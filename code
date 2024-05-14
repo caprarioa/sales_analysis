@@ -1,0 +1,96 @@
+import dash
+import dash_core_components as dcc
+import dash_html_components as html
+from dash.dependencies import Input, Output
+import pandas as pd
+import seaborn as sns
+import plotly.express as px
+import matplotlib
+matplotlib.use('Agg')  # Set Matplotlib to use the 'Agg' backend
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
+import base64
+from io import BytesIO
+
+# Load data
+data = pd.read_csv('data_vanilla.csv')
+data['Year'] = pd.to_datetime(data['Order Date']).dt.year
+data['Month'] = pd.to_datetime(data['Order Date']).dt.to_period('M')
+
+# Initialize the Dash app
+app = dash.Dash(__name__)
+
+# Custom formatter for large numbers
+def human_format(num):
+    magnitude = 0
+    while abs(num) >= 1000:
+        magnitude += 1
+        num /= 1000.0
+    return f'{num:.1f}{" KMBTP"[magnitude]}'
+
+# App layout
+app.layout = html.Div([
+    dcc.Dropdown(
+        id='year-dropdown',
+        options=[{'label': year, 'value': year} for year in data['Year'].unique()],
+        value=data['Year'].min(),
+        clearable=False
+    ),
+    html.Div([  # First row of heatmaps
+        html.Img(id='heatmap-units-sold', style={'width': '50%', 'display': 'inline-block'}),
+        html.Img(id='heatmap-total-profit', style={'width': '50%', 'display': 'inline-block'})
+    ], style={'display': 'flex', 'width': '100%'}),
+    html.Div([  # Second row for the third heatmap
+        html.Img(id='heatmap-cost-efficiency', style={'width': '50%', 'margin': '0 auto', 'display': 'block'}),
+        dcc.Graph(id='time-series-chart', style={'width': '50%', 'display': 'inline-block'})  # Time series chart
+    ], style={'display': 'flex', 'width': '100%'})
+])
+
+# Callbacks to update heatmaps and time series graph
+@app.callback(
+    [Output('heatmap-units-sold', 'src'),
+     Output('heatmap-total-profit', 'src'),
+     Output('heatmap-cost-efficiency', 'src'),
+     Output('time-series-chart', 'figure')],
+    [Input('year-dropdown', 'value')]
+)
+def update_content(selected_year):
+    # Filter data by the selected year
+    filtered_data = data[data['Year'] == selected_year]
+
+    # Ensure there are no divisions by zero and calculate 'Cost Efficiency'
+    filtered_data['Cost Efficiency'] = filtered_data.apply(
+        lambda row: row['Total Profit'] / row['Total Cost'] if row['Total Cost'] != 0 else 0, axis=1
+    )
+
+    # Function to create heatmaps
+    def create_heatmap(dataframe, value_column, cmap, title):
+        pivot_table = dataframe.pivot_table(index='Item Type', columns='Region', values=value_column, fill_value=0)
+        formatted_pivot = pivot_table.applymap(human_format)
+        plt.figure(figsize=(10, 8))
+        ax = sns.heatmap(pivot_table, annot=formatted_pivot, fmt="", cmap=cmap)
+        plt.title(title)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        img_buf = BytesIO()
+        plt.savefig(img_buf, format='png')
+        plt.close()
+        return 'data:image/png;base64,' + base64.b64encode(img_buf.getvalue()).decode('utf-8')
+
+    # Create heatmaps for Units Sold, Total Profit, and Cost Efficiency
+    units_sold_heatmap = create_heatmap(filtered_data, 'Units Sold', 'YlGnBu', f'Units Sold in {selected_year}')
+    total_profit_heatmap = create_heatmap(filtered_data, 'Total Profit', 'viridis', f'Total Profit in {selected_year}')
+    cost_efficiency_heatmap = create_heatmap(filtered_data, 'Cost Efficiency', 'plasma', f'Cost Efficiency in {selected_year}')
+
+    # Create time series graph of total revenue by region
+    time_series_data = filtered_data.groupby(['Month', 'Region'])['Total Revenue'].sum().reset_index()
+    time_series_data['Month'] = time_series_data['Month'].dt.strftime('%Y-%m')  # Format for better readability
+    time_series_fig = px.line(time_series_data, x='Month', y='Total Revenue', color='Region',
+                              labels={'Total Revenue': 'Total Revenue ($)', 'Month': 'Month'},
+                              title='Monthly Total Revenue by Region')
+
+    return units_sold_heatmap, total_profit_heatmap, cost_efficiency_heatmap, time_series_fig
+
+# Run the app
+if __name__ == '__main__':
+    app.run_server(debug=True)
